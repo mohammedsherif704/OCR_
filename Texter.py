@@ -10,7 +10,7 @@ class SeekText:
 
     def __init__(self):
         self.reader = easyocr.Reader(['ar', 'en'])
-
+    
     def read_text(self, image_path, image_name, ext, text_file, new_line = False, cell = False):
         image_path = image_path + '/' + image_name + ext
         image = Image.open(image_path)
@@ -73,10 +73,15 @@ class SeekText:
             if new_line is True:
                 with open(text_file, 'a') as file:
                      file.write('|    ' + full_result + '    |' + '\n')
-                    
+
             else:
                 with open(text_file, 'a') as file:
                     file.write('|    ' + full_result + '    |')
+    
+
+
+
+
 
     def navigate_parts_folder(self, image_parts_path, text_file):
 
@@ -107,12 +112,16 @@ class SeekText:
     def __call__(self,
                  image_path,
                  image_name,
-                 ext
+                 ext,
+                 filename,
+                 pageNo
                 ):
         parts_folder = image_path + '/' + image_name
         text_file = image_path + '/' + image_name + '.txt'
         with open(text_file, 'w') as file:
-            pass
+            file.write(f"الدليل: {filename}\n")  
+            file.write(f"رقم الصفحة: {pageNo}\n")  
+            file.write("\n")  # Add a new line for separation
         if os.path.exists(parts_folder) and os.path.isdir(parts_folder):
             self.navigate_parts_folder(parts_folder, text_file)
         else:
