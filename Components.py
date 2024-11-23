@@ -10,55 +10,12 @@ import json
 import numpy as np
 from typing import Tuple
 import pickle
+from collections import defaultdict
+from collections import Counter
 
 class Layout:
 
-    def clarify_lines(self, img):
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 100, 150, apertureSize=3)
-
-        minLineLength =2
-        maxLineGap = 4
-        lines = cv2.HoughLinesP(edges, 2, np.pi / 180, 350, minLineLength, maxLineGap, 10)
-
-        white_image = np.ones_like(img) * 255
-
-        if lines is not None:
-            for line in lines:
-                for x1, y1, x2, y2 in line:
-                    cv2.line(img, (x1, y1), (x2, y2), (255, 255, 255), 2)
-                    cv2.line(white_image, (x1, y1), (x2, y2), (0, 0, 0), 2)
-
-        image_removed_lines = img
-        lines_in_white_image = white_image
-
-        return image_removed_lines, lines_in_white_image
-
-    def surround_rectangles(self, image_removed_lines, lines_in_white_image):
-
-        gray = cv2.cvtColor(image_removed_lines, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Convert the original image to PIL format for easier drawing
-        image_with_borders = Image.fromarray(cv2.cvtColor(lines_in_white_image, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(image_with_borders)
-
-        border_width =2
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if w > 100:
-                draw.rectangle((x, y, x + w, y + h))
-                for offset in range(border_width):
-                    draw.rectangle((x - offset, y - offset, x + w + offset, y + h + offset), outline="black")
-
-        return lines_in_white_image
-
-
-    def parse_table(self, original_table, white_table, output_dir, idx):
-
-        ##########################################
+    def parse_table(self, original_table, cv_image_table, output_dir, idx):
 
         def isBoldText(image: cv2.Mat, contour: np.ndarray) -> bool:
             '''
@@ -93,7 +50,124 @@ class Layout:
                 w = int(w * w_diff)
                 h = int(h * h_diff)
             return x, y, w, h
-        
+
+        ##########################################
+        def arrange_cells(cells: dict):
+
+            def unify_cells_by_mode(cells, key, threshold=3):
+
+                groups = []
+                
+                # Group cells by proximity to the specified key
+                for cell in cells:
+                    added = False
+                    for group in groups:
+                        if abs(group[0][key] - cell[key]) <= threshold:
+                            group.append(cell)
+                            added = True
+                            break
+                    if not added:
+                        groups.append([cell])
+
+                # Unify values in each group using mode
+                for group in groups:
+                    # Find the mode of the key values
+                    values = [cell[key] for cell in group]
+                    mode_value = Counter(values).most_common(1)[0][0]
+                    
+                    # Update key values and add 'real_<key>' if modified
+                    for cell in group:
+                        if cell[key] != mode_value:
+                            cell[f"real_{key}"] = cell[key]
+                            cell[key] = mode_value
+
+            def group_cells_by_key(cells, key):
+                grouped = defaultdict(list)
+                for cell in cells:
+                    grouped[cell[key]].append(cell)
+                return grouped
+
+            def detect_merged_and_dimension_mapping(grouped_cells, size_key, dimension_key):
+                merged_cells = []
+                dimension_to_size = {}
+                for dimension, cells in grouped_cells.items():
+                    sizes = [cell[size_key] for cell in cells]
+                    min_size = min(sizes)
+                    for cell in cells:
+                        if cell[size_key] > min_size * 1.5:  
+                            merged_cells.append(cell)
+                        else:
+                            dimension_to_size[dimension] = cell[size_key]
+                return merged_cells, dimension_to_size
+
+            def create_next_key_mapping(sorted_keys):
+                return {sorted_keys[i]: sorted_keys[i + 1] for i in range(len(sorted_keys) - 1)}
+
+            def split_merged_cells(merged_cells, dimension_to_size, next_mapping, split_key, size_key, additional_key, real_coord):
+                for merged_cell in merged_cells:
+                    merged_size = merged_cell[size_key]
+                    initial_size = dimension_to_size[merged_cell[split_key]]
+                    next_point = next_mapping.get(merged_cell[split_key])
+
+                    while merged_size - initial_size > 50 and next_point is not None:
+                        cell = {
+                            "x": merged_cell["x"],
+                            "y": next_point,
+                            "width": merged_cell["width"],
+                            "height": merged_cell["height"]
+                        }
+
+                        if real_coord in merged_cell:
+                            cell[additional_key] = merged_cell[real_coord]
+                        else:
+                            cell[additional_key] = merged_cell[split_key]
+                        
+                        initial_size += dimension_to_size[next_point]
+                        cells.append(cell)
+                        next_point = next_mapping.get(next_point)
+
+            def process_cells(cells):
+                
+                unify_cells_by_mode(cells, 'y')
+                unify_cells_by_mode(cells, 'x')
+
+                
+                y_grouped = group_cells_by_key(cells, "y")
+                merged_cells_y, y_to_height = detect_merged_and_dimension_mapping(y_grouped, "height", "y")
+
+                
+                unique_y_values = sorted(y_to_height.keys())
+                y_to_next_y = create_next_key_mapping(unique_y_values)
+
+                
+                split_merged_cells(merged_cells_y, y_to_height, y_to_next_y, "y", "height", "merged_cell_y", 'real_y')
+
+                
+                x_grouped = group_cells_by_key(cells, "x")
+                merged_cells_x, x_to_width = detect_merged_and_dimension_mapping(x_grouped, "width", "x")
+
+                
+                unique_x_values = sorted(x_to_width.keys())
+                x_to_next_x = create_next_key_mapping(unique_x_values)
+
+                
+                split_merged_cells(merged_cells_x, x_to_width, x_to_next_x, "x", "width", "merged_cell_x", 'real_x')
+
+                cells_sorted = sorted(cells, key=lambda d: (d['y'], -d['x']))
+
+                return cells_sorted
+
+            cells = [box for box in cells if box['height'] > 40 and box['width'] > 80]
+            processed_cells = process_cells(cells)
+            y_counts = Counter(cell['y'] for cell in processed_cells)
+            if y_counts:
+                max_y = max(y_counts, key=y_counts.get)
+                max_count = y_counts[max_y]
+            else:
+                max_count = 0
+            
+            return processed_cells, max_count
+                     
         ##########################################
         
         def saveResults(exportImg: cv2.Mat, exportDict: dict, output_dir, idx) -> None:
@@ -107,19 +181,36 @@ class Layout:
             os.makedirs(output_dir, exist_ok=True)
 
             cells_coords = exportDict["results"]
-            cells_coords = sorted(cells_coords, key=lambda d: (d['y'], -d['x']))
-            cells_coords = [box for box in cells_coords if box['height'] > 70]
+            cells_coords, n_cols = arrange_cells(cells_coords)
+
             for cell_number, box in enumerate(cells_coords):
-                x, y, w, h =  box['x'], box['y'], box['width'], box['height']
+                if 'merged_cell_y' in box:
+                    y = box['merged_cell_y']
+                elif 'real_y' in box:
+                    y = box['real_y']
+                else:
+                    y = box['y']
+                
+                if 'merged_cell_x' in box:
+                    x = box['merged_cell_x']
+                elif 'real_x' in box:
+                    x = box['real_x']
+                else:
+                    x = box['x']
+                w, h = box['width'], box['height']
                 xmin, ymin, xmax, ymax = (x, y, x + w, y + h)
                 cell_image = exportImg.crop((xmin, ymin, xmax, ymax))
                 cell_image.save(os.path.join(output_dir, f'cell_{cell_number}.png'))
 
             
             
+            with open(os.path.join(output_dir, 'cells_coords.json'), "w") as json_file:
+                json.dump(cells_coords, json_file, indent=4)
+            
+            
             with open(os.path.join(output_dir, 'n_cols.pkl'), 'wb') as file:
                 # Write the variable to the pickle file
-                pickle.dump(3, file)
+                pickle.dump(n_cols, file)
 
             print(f"Saved {len(cells_coords)} cell images in '{output_dir}' folder.")
             with open(os.path.join(output_dir, 'n_cells.pkl'), 'wb') as file:
@@ -207,13 +298,31 @@ class Layout:
                     image, (__resizeRatio, __resizeRatio), interpolation=cv2.INTER_CUBIC)
                 __resizeFlag = True
             return image
+        ##########################################
+
+        def detectHeader(exportImg: cv2.Mat, exportDict: dict, output_dir, idx):
+            cells_coords = exportDict["results"]
+            cells_coords = [box for box in cells_coords if box['height'] > 40 and box['width'] > 80]
+            xs = [coord['x'] + coord['width'] for coord in cells_coords]
+            ys = [coord['y'] for coord in cells_coords]
+            if len(ys) != 0:
+                xmax = max(xs)
+                ymin = min(ys)
+                if ymin > 50:
+                    output_dir = output_dir + '/' + 'cells_' + str(idx)
+                    header = exportImg.crop((2, 0, xmax, ymin))
+                    header.save(os.path.join(output_dir, 'header.png'))
+                    print('Header Saved')
+                else:
+                    print('No Header')
+
 
         global __resizeRatio
         global __resizeFlag
         __resizeRatio = 640
         __resizeFlag = False
         global __image
-        __image = white_table
+        __image = cv_image_table
         global __orgHeight
         global __orgWidth
         __orgHeight, __orgWidth, _ = __image.shape
@@ -221,9 +330,10 @@ class Layout:
         processedImg = extractBoundary(__resize)
         exportImg, exportDict = contourDetection(processedImg)
         saveResults(original_table, exportDict, output_dir, idx)
+        detectHeader(original_table, exportDict, output_dir, idx)
 ##########################################
 
-    def split_components(self, image_path, image_name, image, tables_coords, tables, n_tables):
+    def split_components(self, image_path, image_name, image, tables_coords, n_tables):
 
         output_dir = image_path + '/' + image_name
         os.makedirs(output_dir, exist_ok=True)
@@ -237,7 +347,6 @@ class Layout:
         sorted_coords_with_indices = sorted(enumerate(tables_coords), key=lambda x: x[1][1])
         sorted_indices = [index for index, _ in sorted_coords_with_indices]
         sorted_coords = [coords for _, coords in sorted_coords_with_indices]
-        sorted_tables = [tables[i] for i in sorted_indices]
 
         for idx, box in enumerate(sorted_coords):
             xmin, ymin, xmax, ymax = box
@@ -245,7 +354,7 @@ class Layout:
 
             cropped_image.save(os.path.join(output_dir, f'table_{idx}.png'))
 
-            self.parse_table(cropped_image, sorted_tables[idx], output_dir, idx)
+            self.parse_table(cropped_image, cv2.cvtColor(np.array(cropped_image), cv2.COLOR_RGB2BGR), output_dir, idx)
 
             cv_image[int(ymin):int(ymax), int(xmin):int(xmax)] = 255
             midpoint = int((ymin + ymax) / 2)
@@ -274,10 +383,7 @@ class Layout:
 
     def detect_table(self, image_path, image_name, orignal_image):
 
-        image_removed_lines, lines_in_white_image = self.clarify_lines(orignal_image.copy())
-        lines_in_white_image = self.surround_rectangles(image_removed_lines, lines_in_white_image)
-
-        gray = cv2.cvtColor(lines_in_white_image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(orignal_image, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
 
         # Detect table structure using morphological operations
@@ -296,17 +402,15 @@ class Layout:
         valid_contours = [cnt for cnt in contours if cv2.boundingRect(cnt)[2] >= min_table_width and cv2.boundingRect(cnt)[3] >= min_table_height]
         table_index = len(valid_contours)
 
-        white_tables  = []
         tables_coords = []
         if table_index:
             for cnt in valid_contours:
                 x, y, w, h = cv2.boundingRect(cnt)
                 tables_coords.append((x, y, x + w, y + h))
-                white_tables.append(lines_in_white_image[y:y + h, x:x + w])
 
         
             print(f"{table_index} tables detected in {image_path + '/' + image_name}.")
-            self.split_components(image_path, image_name, orignal_image, tables_coords, white_tables, table_index)
+            self.split_components(image_path, image_name, orignal_image, tables_coords, table_index)
 
     def __call__(self,
                  image_path,
@@ -315,7 +419,7 @@ class Layout:
                 ):
         
         full_image_path = fr"{image_path}/{image_name}{ext}"
-        print(full_image_path)
+        #print(full_image_path)
         image = cv2.imread(full_image_path)
         if image is None or image.size == 0:
             raise ValueError("Image is empty or not loaded correctly.")
