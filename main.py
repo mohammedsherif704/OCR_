@@ -8,7 +8,7 @@ from spire.presentation import *
 from spire.presentation.common import *
 #from dotenv import load_dotenv
 #load_dotenv()
-from Components import Layout
+from Component import Layout
 #from TextParse.Texter import SeekText
 
 
@@ -105,6 +105,6 @@ if __name__ == "__main__":
     global component
     component = Layout()
 
-    global text_seeker
+    #global text_seeker
     #text_seeker = SeekText()
-    main(r'data', 'output')
+    main(r'data_used', 'output')
